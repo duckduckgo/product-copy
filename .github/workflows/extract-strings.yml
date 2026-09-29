@@ -1,0 +1,52 @@
+name: Extract product copy strings
+
+# Updates each submodule to the tip of its tracked branch (see .gitmodules), regenerates
+# strings.csv, and commits the result when anything changed.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily, 06:00 UTC
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - scripts/extract_strings.py
+      - .github/workflows/extract-strings.yml
+      - .gitmodules
+
+permissions:
+  contents: write
+
+concurrency:
+  group: extract-strings
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update submodules to their tracked branches
+        run: git submodule update --init --remote --depth 1 --jobs 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Extract strings
+        run: python3 scripts/extract_strings.py --output strings.csv
+
+      - name: Commit changes
+        run: |
+          git add strings.csv apps/android apps/apple
+          if git diff --cached --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update product copy strings" \
+            -m "android: $(git -C apps/android rev-parse --short HEAD), apple: $(git -C apps/apple rev-parse --short HEAD)"
+          git push
