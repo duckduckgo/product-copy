@@ -1,0 +1,8 @@
+[submodule "apps/android"]
+	path = apps/android
+	url = https://github.com/duckduckgo/Android
+	branch = develop
+[submodule "apps/apple"]
+	path = apps/apple
+	url = https://github.com/duckduckgo/apple-browsers
+	branch = main
