@@ -1,7 +1,7 @@
 name: Extract product copy strings
 
 # Updates each submodule to the tip of its tracked branch (see .gitmodules), regenerates
-# strings.csv, and commits the result when anything changed.
+# strings/<platform>/<content_type>.csv, and commits the result when anything changed.
 
 on:
   schedule:
@@ -36,11 +36,12 @@ jobs:
           python-version: "3.12"
 
       - name: Extract strings
-        run: python3 scripts/extract_strings.py --output strings.csv
+        run: python3 scripts/extract_strings.py --output strings
 
       - name: Commit changes
         run: |
-          git add strings.csv apps/android apps/apple
+          git add -A strings
+          git add apps/android apps/apple
           if git diff --cached --quiet; then
             echo "No changes."
             exit 0

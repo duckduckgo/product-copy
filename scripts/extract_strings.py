@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Extract English product copy from the app submodules into one normalized CSV.
+"""Extract English product copy from the app submodules into CSVs split by platform and content type.
 
 Sources:
   apps/android  Android string resources (res/values/*.xml: <string>, <plurals>, <string-array>)
   apps/apple    iOS/macOS String Catalogs (*.xcstrings) and en.lproj *.strings / *.stringsdict
 
 Each row is one piece of user-visible text. Plural forms and array items get one row
-each, distinguished by the `variant` column. Standard library only.
+each, distinguished by the `variant` column. Output is one folder per platform with one
+CSV per content type (buttons.csv, headings.csv, …); every file has the same header.
+Standard library only.
 
-Usage: python3 scripts/extract_strings.py [--output strings.csv]
+Usage: python3 scripts/extract_strings.py [--output strings]
 """
 
 import argparse
@@ -30,6 +32,7 @@ SUBMODULES = {
 
 COLUMNS = [
     "platform",           # Android | iOS | macOS | Apple (shared)
+    "content_type",       # One of CONTENT_TYPES; also the name of the CSV the row is written to
     "module",             # Gradle module or Apple target/package the string belongs to
     "key",                # String identifier used in code
     "variant",            # Plural form (plural:one), array item (item:0), substitution, device; blank if none
@@ -353,11 +356,112 @@ def extract_apple():
     return rows
 
 
+# --- Content types -----------------------------------------------------------------------------
+
+# Output file name -> description. Every platform folder gets every file, even if empty.
+CONTENT_TYPES = {
+    "buttons": "Buttons, CTAs and dialog actions",
+    "headings": "Titles and headers of screens, dialogs, sections and cards",
+    "body": "Descriptions, messages, subtitles and other sentence-length copy",
+    "labels": "Short UI text: settings rows, options, toggles, tabs, chips, form labels",
+    "menu_items": "Menu and context-menu entries",
+    "errors": "Error messages and error states",
+    "notifications": "Notifications, toasts and snackbars",
+    "placeholders": "Input placeholders and hints",
+    "tooltips": "Tooltips and tips",
+    "links": "Link text",
+    "accessibility": "Screen-reader text (content descriptions, accessibility labels)",
+    "internal": "Android internal/debug builds only; not shown to users",
+}
+
+PLATFORM_FOLDERS = {"Android": "android", "iOS": "ios", "macOS": "macos", "Apple (shared)": "apple-shared"}
+
+# Words that decide the type wherever they appear in a key, checked in this order
+# (so `error.button.retry` is a button and `sync_error_title` is an error).
+PRIORITY_WORDS = [
+    ("accessibility", {"accessibility", "a11y", "voiceover", "accessible", "cd"}),
+    ("buttons", {"button", "buttons", "btn", "cta"}),
+    ("placeholders", {"placeholder", "hint"}),
+    ("tooltips", {"tooltip", "tip"}),
+    ("errors", {"error", "errors", "failed", "failure", "invalid"}),
+    ("notifications", {"notification", "notifications", "toast", "snackbar", "push"}),
+    ("menu_items", {"menu"}),
+]
+
+# Words where the one closest to the end of the key wins (`header_description` is body copy).
+POSITIONAL_WORDS = {
+    "buttons": {"action", "actions", "positive", "negative", "ok", "cancel", "confirm", "dismiss", "accept",
+                "decline", "done", "save", "retry", "continue", "skip", "close"},
+    "headings": {"title", "titles", "header", "heading", "headline"},
+    "body": {"description", "desc", "message", "body", "text", "subtitle", "subheader", "caption", "info",
+             "details", "detail", "content", "instructions", "explanation", "summary", "paragraph", "footer",
+             "note", "notice", "disclaimer", "warning", "prompt", "secondary", "step", "faq", "question",
+             "answer"},
+    "labels": {"label", "labels", "name", "toggle", "switch", "checkbox", "option", "options", "choice",
+               "setting", "preference", "item", "cell", "row", "category", "reason", "tab", "chip", "badge",
+               "picker", "segment", "value", "status", "primary"},
+    "links": {"link", "url"},
+}
+POSITIONAL_LOOKUP = {word: ctype for ctype, words in POSITIONAL_WORDS.items() for word in words}
+
+
+def words(identifier):
+    """Split camelCase, snake_case, dotted and kebab-case identifiers into lowercase words."""
+    identifier = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", identifier)
+    identifier = re.sub(r"([a-z])([A-Z0-9])|([0-9])([A-Za-z])", r"\1\3 \2\4", identifier)
+    return [w for w in re.split(r"[^A-Za-z0-9]+", identifier.lower()) if w]
+
+
+def match_content_type(ws, last_wins):
+    if any(ws[i:i + 2] == ["content", "description"] for i in range(len(ws) - 1)):
+        return "accessibility"
+    for ctype, vocab in PRIORITY_WORDS:
+        if vocab.intersection(ws):
+            return ctype
+    for w in reversed(ws) if last_wins else ws:
+        if w in POSITIONAL_LOOKUP:
+            return POSITIONAL_LOOKUP[w]
+    return None
+
+
+def content_type(row):
+    """Best guess at the UI element a string is used in, from its key, then its comment, then its text."""
+    if row["internal_only"] == "true":
+        return "internal"
+    key = row["key"]
+    # Apple keys are sometimes the English text itself, which says nothing about the element.
+    ctype = None if " " in key.strip() else match_content_type(words(key), last_wins=True)
+    ctype = ctype or match_content_type(words(row["developer_comment"])[:12], last_wins=False)
+    if ctype:
+        return ctype
+    text = row["text"].strip()
+    return "body" if re.search(r"[.!?:]$", text) or len(text.split()) >= 8 else "labels"
+
+
+def write_outputs(rows, out_dir):
+    for folder in PLATFORM_FOLDERS.values():
+        (out_dir / folder).mkdir(parents=True, exist_ok=True)
+        for stale in (out_dir / folder).glob("*.csv"):
+            stale.unlink()
+    files = {}
+    try:
+        for platform, folder in PLATFORM_FOLDERS.items():
+            for ctype in CONTENT_TYPES:
+                f = open(out_dir / folder / f"{ctype}.csv", "w", newline="", encoding="utf-8")
+                files[platform, ctype] = (f, csv.DictWriter(f, fieldnames=COLUMNS))
+                files[platform, ctype][1].writeheader()
+        for row in rows:
+            files[row["platform"], row["content_type"]][1].writerow(row)
+    finally:
+        for f, _ in files.values():
+            f.close()
+
+
 # --- Main --------------------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--output", default=str(ROOT / "strings.csv"))
+    parser.add_argument("--output", default=str(ROOT / "strings"), help="output directory; CSVs in its platform folders are replaced on each run")
     args = parser.parse_args()
 
     rows = []
@@ -367,16 +471,15 @@ def main():
             sys.exit(f"error: submodule apps/{name} is not checked out (run: git submodule update --init)")
         rows += extract()
 
-    with open(args.output, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=COLUMNS)
-        writer.writeheader()
-        writer.writerows(rows)
+    for row in rows:
+        row["content_type"] = content_type(row)
+    write_outputs(rows, Path(args.output))
 
     counts = {}
     for r in rows:
         counts[r["platform"]] = counts.get(r["platform"], 0) + 1
     summary = ", ".join(f"{p}: {c}" for p, c in sorted(counts.items()))
-    print(f"Wrote {len(rows)} rows to {args.output} ({summary})")
+    print(f"Wrote {len(rows)} rows to {args.output}/ ({summary})")
 
 
 if __name__ == "__main__":
